@@ -46,7 +46,8 @@ builder.Services.AddHttpClient<IGenericUserClientRepository, GenericUserClientRe
 });
 
 // ---------- Application Services ----------
-builder.Services.AddScoped<ICategoryService, CategoryService>();
+builder.Services.AddScoped<IVendorService, VendorService>();
+
 
 var app = builder.Build();
 

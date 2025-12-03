@@ -9,26 +9,56 @@ namespace EStore.Entity.Models
         {
         }
 
-        // ----------------- DB SETS --------------------
-        public DbSet<Category> Categories { get; set; }
-
-        // If you add more modules later (Vendors, Products, Purchases etc)
-        // add DbSets here.
-        // public DbSet<Product> Products { get; set; }
-        // public DbSet<Vendor> Vendors { get; set; }
-        // public DbSet<Purchase> Purchases { get; set; }
+        public DbSet<Vendor> Vendors { get; set; }
+        public DbSet<Purchase> Purchases { get; set; }
+        public DbSet<PurchaseItem> PurchaseItems { get; set; }
+        public DbSet<PurchaseInvoiceEntry> PurchaseInvoiceEntries { get; set; }
 
         protected override void OnModelCreating(ModelBuilder modelBuilder)
         {
             base.OnModelCreating(modelBuilder);
 
-            // Ensure schema EStore exists
             modelBuilder.HasDefaultSchema("EStore");
 
-            // Category table mapping (optional, already mapped by attributes)
-            modelBuilder.Entity<Category>(entity =>
+            // Vendor
+            modelBuilder.Entity<Vendor>(entity =>
             {
-                entity.ToTable("Categories", "EStore");
+                entity.ToTable("Vendors", "EStore");
+            });
+
+            // Purchase
+            modelBuilder.Entity<Purchase>(entity =>
+            {
+                entity.ToTable("Purchases", "EStore");
+
+                entity.HasMany(p => p.Items)
+                      .WithOne(i => i.Purchase!)
+                      .HasForeignKey(i => i.PurchaseId)
+                      .OnDelete(DeleteBehavior.Cascade); // OK
+            });
+
+            // PurchaseItem
+            modelBuilder.Entity<PurchaseItem>(entity =>
+            {
+                entity.ToTable("PurchaseItems", "EStore");
+            });
+
+            // PurchaseInvoiceEntry
+            modelBuilder.Entity<PurchaseInvoiceEntry>(entity =>
+            {
+                entity.ToTable("PurchaseInvoiceEntries", "EStore");
+
+                // ❌ DO NOT cascade from Purchase to InvoiceEntries
+                entity.HasOne(e => e.Purchase)
+                      .WithMany()
+                      .HasForeignKey(e => e.PurchaseOrderId)
+                      .OnDelete(DeleteBehavior.NoAction);
+
+                // ✅ Cascade from PurchaseItem to InvoiceEntries is ok
+                entity.HasOne(e => e.PurchaseItem)
+                      .WithMany()
+                      .HasForeignKey(e => e.PurchaseItemId)
+                      .OnDelete(DeleteBehavior.Cascade);
             });
         }
     }
