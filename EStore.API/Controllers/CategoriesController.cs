@@ -1,5 +1,4 @@
-﻿using EStore.Entity.DTO.Category;
-using EStore.Services.Common.Behaviors;
+﻿using EStore.Services.Common.Behaviors;
 using EStore.Services.Interfaces;
 using Microsoft.AspNetCore.Mvc;
 
@@ -9,47 +8,41 @@ namespace EStore.Controllers
     [Route("api/[controller]")]
     public class CategoriesController : ControllerBase
     {
-        private readonly ICategoryService _service;
+        private readonly ICategoryService _svc;
+        public CategoriesController(ICategoryService svc) => _svc = svc;
 
-        public CategoriesController(ICategoryService service)
-        {
-            _service = service;
-        }
-
-        [HttpGet("school/{schoolId}")]
+        [HttpGet("get-all/{schoolId}")]
         public async Task<ActionResult<Result<IEnumerable<CategoryResponseDto>>>> GetAll(int schoolId)
         {
-            var res = await _service.GetAllAsync(schoolId);
+            var res = await _svc.GetAllAsync(schoolId);
             return StatusCode(int.Parse(res.StatusCode ?? "200"), res);
         }
 
-        [HttpGet("GetCategoryById/{id:int}")]
-        public async Task<ActionResult<Result<CategoryResponseDto?>>> GetById(int id)
+        [HttpGet("get/{id:int}")]
+        public async Task<ActionResult<Result<CategoryResponseDto?>>> Get(int id)
         {
-            var res = await _service.GetByIdAsync(id);
+            var res = await _svc.GetByIdAsync(id);
             return StatusCode(int.Parse(res.StatusCode ?? "200"), res);
         }
 
-        [HttpPost("CreateCategory")]
-        [Consumes("multipart/form-data")]
-        public async Task<ActionResult<Result<CategoryResponseDto>>> Create([FromForm] CategoryCreateDto dto)
+        [HttpPost("create")]
+        public async Task<ActionResult<Result<CategoryResponseDto>>> Create([FromBody] CategoryCreateDto dto)
         {
-            var res = await _service.CreateAsync(dto);
+            var res = await _svc.CreateAsync(dto);
             return StatusCode(int.Parse(res.StatusCode ?? "201"), res);
         }
 
-        [HttpPut("UpdateCategory/{id:int}")]
-        [Consumes("multipart/form-data")]
-        public async Task<ActionResult<Result<CategoryResponseDto>>> Update(int id, [FromForm] CategoryUpdateDto dto)
+        [HttpPut("update/{id:int}")]
+        public async Task<ActionResult<Result<CategoryResponseDto>>> Update(int id, [FromBody] CategoryUpdateDto dto)
         {
-            var res = await _service.UpdateAsync(id, dto);
+            var res = await _svc.UpdateAsync(id, dto);
             return StatusCode(int.Parse(res.StatusCode ?? "200"), res);
         }
 
-        [HttpDelete("DeleteCategory/{id:int}")]
+        [HttpDelete("delete/{id:int}")]
         public async Task<ActionResult<Result<bool>>> Delete(int id)
         {
-            var res = await _service.DeleteAsync(id);
+            var res = await _svc.DeleteAsync(id);
             return StatusCode(int.Parse(res.StatusCode ?? "200"), res);
         }
     }

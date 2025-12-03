@@ -47,6 +47,10 @@ builder.Services.AddHttpClient<IGenericUserClientRepository, GenericUserClientRe
 
 // ---------- Application Services ----------
 builder.Services.AddScoped<ICategoryService, CategoryService>();
+builder.Services.AddScoped<ICategoryAttributeService, CategoryAttributeService>();
+builder.Services.AddScoped<IProductService, ProductService>();
+
+
 
 var app = builder.Build();
 
