@@ -1,12 +1,9 @@
-﻿using EStore.Entity.Common.Enums;
-using EStore.Entity.DTO.Category;
+﻿using EStore.Entity.DTO.CategoryAttribute;
 using EStore.Entity.Models;
 using EStore.Services.Common.Behaviors;
 using EStore.Services.Common.Constant;
 using EStore.Services.Interfaces;
 using EStore.Services.Interfaces.GenericClient;
-using Microsoft.AspNetCore.Hosting;
-using Microsoft.AspNetCore.Http;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.Logging;
 using System.Text.Json;
@@ -18,392 +15,271 @@ namespace EStore.Services.Repositories
         private readonly ApplicationDbContext _db;
         private readonly ILogger<CategoryService> _logger;
         private readonly IGenericUserClientRepository _userClient;
-        private readonly IWebHostEnvironment _env;
 
-        public CategoryService(
-            ApplicationDbContext db,
+        public CategoryService(ApplicationDbContext db,
             ILogger<CategoryService> logger,
-            IGenericUserClientRepository userClient,
-            IWebHostEnvironment env)
+            IGenericUserClientRepository userClient)
         {
             _db = db;
             _logger = logger;
             _userClient = userClient;
-            _env = env;
         }
 
-        //  VALIDATE ADMIN (Safe JSON parsing)
+        // (re-use your existing ValidateAdminAsync implementation that calls SMS and checks roles & school)
         private async Task<(bool Ok, string Message)> ValidateAdminAsync(Guid adminId, int schoolId)
         {
-            if (adminId == Guid.Empty)
-                return (false, "AdminId is required.");
-
+            if (adminId == Guid.Empty) return (false, "adminId required");
             try
             {
-                var json = await _userClient.GetAsync<JsonElement>(
-                    $"{ApiConstants.GetUserDetails}/{adminId}");
-
-                _logger.LogWarning("RAW ADMIN JSON => " + json.ToString());
-
-                // Check success = true
-                if (!json.TryGetProperty("success", out var successElem) ||
-                    !successElem.GetBoolean())
-                    return (false, "Admin not found in SMS.");
-
-                // Extract data
-                if (!json.TryGetProperty("data", out var dataElem))
-                    return (false, "SMS response missing data.");
-
-                // Extract school id
-                if (!dataElem.TryGetProperty("schoolId", out var schoolElem) ||
-                    schoolElem.ValueKind != JsonValueKind.Number)
-                    return (false, "Invalid or missing schoolId in SMS response.");
-
-                int adminSchool = schoolElem.GetInt32();
-
-                if (adminSchool != schoolId)
-                    return (false, $"Admin belongs to school {adminSchool}, not {schoolId}.");
-
-                // Extract roles
-                if (!dataElem.TryGetProperty("roles", out var rolesElem) ||
-                    rolesElem.ValueKind != JsonValueKind.Array)
-                    return (false, "Roles missing in SMS response.");
-
-                List<string> roles = rolesElem.EnumerateArray()
-                                              .Where(r => r.ValueKind == JsonValueKind.String)
-                                              .Select(r => r.GetString())
-                                              .ToList();
-
-                var allowed = new HashSet<string>(StringComparer.OrdinalIgnoreCase)
-                {
-                    "super_admin",
-                    "store_admin"
-                };
-
-                if (!roles.Any(r => allowed.Contains(r)))
-                    return (false, "Admin does not have permission.");
-
+                var json = await _userClient.GetAsync<JsonElement>($"{ApiConstants.GetUserDetails}/{adminId}");
+                if (!json.TryGetProperty("success", out var successElem) || !successElem.GetBoolean())
+                    return (false, "Admin not found");
+                if (!json.TryGetProperty("data", out var dataElem)) return (false, "Invalid SMS response");
+                if (!dataElem.TryGetProperty("schoolId", out var schElem)) return (false, "SchoolId missing");
+                var adminSchool = schElem.GetInt32();
+                if (adminSchool != schoolId) return (false, $"Admin belongs to school {adminSchool}");
+                if (!dataElem.TryGetProperty("roles", out var rolesElem) || rolesElem.ValueKind != JsonValueKind.Array)
+                    return (false, "Roles missing");
+                var roles = rolesElem.EnumerateArray().Select(r => r.GetString()).ToList();
+                var allowed = new HashSet<string>(StringComparer.OrdinalIgnoreCase) { "super_admin", "store_admin" };
+                if (!roles.Any(r => allowed.Contains(r))) return (false, "Admin lacks permission");
                 return (true, "");
             }
             catch (Exception ex)
             {
-                _logger.LogError(ex, "Admin validation failed.");
-                return (false, "Failed to validate admin user.");
+                _logger.LogError(ex, "ValidateAdmin failed");
+                return (false, "Failed to validate admin");
             }
         }
 
-        // IMAGE UPLOAD
-        private async Task<string> SaveImageAsync(IFormFile file)
-        {
-            var root = _env.WebRootPath ?? Path.Combine(Directory.GetCurrentDirectory(), "wwwroot");
-            var folder = Path.Combine("uploads", "categories",
-                DateTime.UtcNow.Year.ToString(),
-                DateTime.UtcNow.Month.ToString("00"));
-
-            Directory.CreateDirectory(Path.Combine(root, folder));
-
-            var filename = $"{Guid.NewGuid():N}{Path.GetExtension(file.FileName)}";
-            var path = Path.Combine(root, folder, filename);
-
-            await using var fs = File.Create(path);
-            await file.CopyToAsync(fs);
-
-            return "/" + Path.Combine(folder, filename).Replace("\\", "/");
-        }
-
-        //  GET ALL
         public async Task<Result<IEnumerable<CategoryResponseDto>>> GetAllAsync(int schoolId)
         {
-            var list = await _db.Categories
+            var cats = await _db.Categories
                 .AsNoTracking()
                 .Where(c => c.SchoolId == schoolId)
                 .OrderBy(c => c.Name)
                 .ToListAsync();
 
-            return new Result<IEnumerable<CategoryResponseDto>>
+            // fetch attribute ids then the attribute data in bulk for efficiency
+            var categoryIds = cats.Select(c => c.Id).ToList();
+
+            var maps = await _db.CategoryCategoryAttributes
+                .AsNoTracking()
+                .Where(m => categoryIds.Contains(m.CategoryId))
+                .ToListAsync();
+
+            var attributeIds = maps.Select(m => m.CategoryAttributeId).Distinct().ToList();
+
+            var attributes = await _db.CategoryAttributes
+                .AsNoTracking()
+                .Where(a => attributeIds.Contains(a.Id))
+                .ToListAsync();
+
+            var attributeById = attributes.ToDictionary(a => a.Id);
+
+            var result = cats.Select(c =>
             {
-                Success = true,
-                StatusCode = "200",
-                Message = "Categories retrieved",
-                Data = list.Select(c => new CategoryResponseDto
+                var assigned = maps.Where(m => m.CategoryId == c.Id)
+                                   .Select(m => m.CategoryAttributeId)
+                                   .Where(id => attributeById.ContainsKey(id))
+                                   .Select(id => new CategoryAttributeResponseDto
+                                   {
+                                       Id = attributeById[id].Id,
+                                       AttributeName = attributeById[id].Name,
+                                       Values = attributeById[id].Values,
+                                       SchoolId = attributeById[id].SchoolId,
+                                       AdminId = attributeById[id].AdminId,
+                                       IsActive = attributeById[id].IsActive,
+                                       CreatedAt = attributeById[id].CreatedAt
+                                   }).ToList();
+
+                return new CategoryResponseDto
                 {
                     Id = c.Id,
+                    Name = c.Name,
                     SchoolId = c.SchoolId,
                     AdminId = c.AdminId,
-                    Name = c.Name,
-                    HasSizeVariants = c.HasSizeVariants,
-                    SizeType = c.SizeType,
-                    AvailableSizes = c.AvailableSizes,
-                    ImageUrl = c.ImageUrl,
                     IsActive = c.IsActive,
-                    CreatedAt = c.CreatedAt
-                })
-            };
+                    CreatedAt = c.CreatedAt,
+                    Attributes = assigned
+                };
+            });
+
+            return new Result<IEnumerable<CategoryResponseDto>> { Success = true, StatusCode = "200", Data = result, Message = "Categories fetched" };
         }
 
-        
-        //  GET BY ID
         public async Task<Result<CategoryResponseDto?>> GetByIdAsync(int id)
         {
-            var c = await _db.Categories.AsNoTracking()
-                .FirstOrDefaultAsync(x => x.Id == id);
+            var c = await _db.Categories.AsNoTracking().FirstOrDefaultAsync(x => x.Id == id);
+            if (c == null) return new Result<CategoryResponseDto?> { Success = false, StatusCode = "404", Message = "Category not found" };
 
-            if (c == null)
-                return new Result<CategoryResponseDto?>
-                {
-                    Success = false,
-                    StatusCode = "404",
-                    Message = "Category not found"
-                };
+            var maps = await _db.CategoryCategoryAttributes.AsNoTracking().Where(m => m.CategoryId == id).ToListAsync();
+            var attrIds = maps.Select(m => m.CategoryAttributeId).ToList();
+            var attributes = await _db.CategoryAttributes.AsNoTracking().Where(a => attrIds.Contains(a.Id)).ToListAsync();
 
-            return new Result<CategoryResponseDto?>
+            var resp = new CategoryResponseDto
             {
-                Success = true,
-                StatusCode = "200",
-                Data = new CategoryResponseDto
+                Id = c.Id,
+                Name = c.Name,
+                SchoolId = c.SchoolId,
+                AdminId = c.AdminId,
+                IsActive = c.IsActive,
+                CreatedAt = c.CreatedAt,
+                Attributes = attributes.Select(a => new CategoryAttributeResponseDto
                 {
-                    Id = c.Id,
-                    SchoolId = c.SchoolId,
-                    AdminId = c.AdminId,
-                    Name = c.Name,
-                    HasSizeVariants = c.HasSizeVariants,
-                    SizeType = c.SizeType,
-                    AvailableSizes = c.AvailableSizes,
-                    ImageUrl = c.ImageUrl,
-                    IsActive = c.IsActive,
-                    CreatedAt = c.CreatedAt
-                }
+                    Id = a.Id,
+                    AttributeName = a.Name,
+                    Values = a.Values,
+                    SchoolId = a.SchoolId,
+                    AdminId = a.AdminId,
+                    IsActive = a.IsActive,
+                    CreatedAt = a.CreatedAt
+                }).ToList()
             };
+
+            return new Result<CategoryResponseDto?> { Success = true, StatusCode = "200", Data = resp, Message = "Category fetched" };
         }
 
-        // CREATE
         public async Task<Result<CategoryResponseDto>> CreateAsync(CategoryCreateDto dto)
         {
-            var check = await ValidateAdminAsync(dto.AdminId, dto.SchoolId);
-            if (!check.Ok)
-                return new Result<CategoryResponseDto>
-                {
-                    Success = false,
-                    StatusCode = "403",
-                    Message = check.Message
-                };
+            // validate
+            var adminCheck = await ValidateAdminAsync(dto.AdminId, dto.SchoolId);
+            if (!adminCheck.Ok) return new Result<CategoryResponseDto> { Success = false, StatusCode = "403", Message = adminCheck.Message };
 
+            // duplicate name
             if (await _db.Categories.AnyAsync(c => c.Name == dto.Name && c.SchoolId == dto.SchoolId))
-                return new Result<CategoryResponseDto>
-                {
-                    Success = false,
-                    StatusCode = "409",
-                    Message = "Category already exists"
-                };
+                return new Result<CategoryResponseDto> { Success = false, StatusCode = "409", Message = "Category already exists" };
 
-            // ****************************
-            // SIZE VALIDATION LOGIC
-            // ****************************
-            if (!dto.HasSizeVariants)
-            {
-                dto.SizeType = SizeType.None;
-                dto.AvailableSizes = null;
-            }
-            else
-            {
-                if (dto.SizeType == SizeType.None)
-                    return new Result<CategoryResponseDto>
-                    {
-                        Success = false,
-                        StatusCode = "422",
-                        Message = "SizeType is required when HasSizeVariants = true"
-                    };
-
-                if (string.IsNullOrWhiteSpace(dto.AvailableSizes))
-                    return new Result<CategoryResponseDto>
-                    {
-                        Success = false,
-                        StatusCode = "422",
-                        Message = "AvailableSizes is required when HasSizeVariants = true"
-                    };
-            }
-            // ****************************
-
-            string? imageUrl = dto.Image != null ? await SaveImageAsync(dto.Image) : null;
-
-            var entity = new Category
+            var category = new Category
             {
                 SchoolId = dto.SchoolId,
                 AdminId = dto.AdminId,
                 Name = dto.Name,
-                HasSizeVariants = dto.HasSizeVariants,
-                SizeType = dto.SizeType,
-                AvailableSizes = dto.AvailableSizes,
-                ImageUrl = imageUrl
+                IsActive = true,
+                CreatedAt = DateTime.UtcNow
             };
 
-            _db.Categories.Add(entity);
-            await _db.SaveChangesAsync();
-
-            return new Result<CategoryResponseDto>
+            await using var tx = await _db.Database.BeginTransactionAsync();
+            try
             {
-                Success = true,
-                StatusCode = "201",
-                Message = "Category created",
-                Data = new CategoryResponseDto
+                _db.Categories.Add(category);
+                await _db.SaveChangesAsync();
+
+                // add mapping rows
+                foreach (var attrId in dto.AttributeIds.Distinct())
                 {
-                    Id = entity.Id,
-                    SchoolId = entity.SchoolId,
-                    AdminId = entity.AdminId,
-                    Name = entity.Name,
-                    HasSizeVariants = entity.HasSizeVariants,
-                    SizeType = entity.SizeType,
-                    AvailableSizes = entity.AvailableSizes,
-                    ImageUrl = entity.ImageUrl,
-                    IsActive = entity.IsActive,
-                    CreatedAt = entity.CreatedAt
+                    // optionally ensure attribute exists & belongs to same school
+                    var attrExists = await _db.CategoryAttributes.AnyAsync(a => a.Id == attrId && a.SchoolId == dto.SchoolId);
+                    if (!attrExists)
+                    {
+                        await tx.RollbackAsync();
+                        return new Result<CategoryResponseDto> { Success = false, StatusCode = "422", Message = $"Attribute {attrId} not found for school." };
+                    }
+
+                    _db.CategoryCategoryAttributes.Add(new CategoryCategoryAttribute
+                    {
+                        CategoryId = category.Id,
+                        CategoryAttributeId = attrId,
+                        CreatedAt = DateTime.UtcNow
+                    });
                 }
-            };
+
+                await _db.SaveChangesAsync();
+                await tx.CommitAsync();
+            }
+            catch (Exception ex)
+            {
+                await tx.RollbackAsync();
+                _logger.LogError(ex, "Create category failed");
+                return new Result<CategoryResponseDto> { Success = false, StatusCode = "500", Message = "Failed to create category" };
+            }
+
+            return await GetByIdAsync(category.Id) as Result<CategoryResponseDto>; // reuse mapping
         }
 
-
-        // UPDATE
         public async Task<Result<CategoryResponseDto>> UpdateAsync(int id, CategoryUpdateDto dto)
         {
             var c = await _db.Categories.FirstOrDefaultAsync(x => x.Id == id);
-            if (c == null)
-                return new Result<CategoryResponseDto>
-                {
-                    Success = false,
-                    StatusCode = "404",
-                    Message = "Category not found"
-                };
+            if (c == null) return new Result<CategoryResponseDto> { Success = false, StatusCode = "404", Message = "Category not found" };
 
-            var check = await ValidateAdminAsync(c.AdminId, c.SchoolId);
-            if (!check.Ok)
-                return new Result<CategoryResponseDto>
-                {
-                    Success = false,
-                    StatusCode = "403",
-                    Message = check.Message
-                };
+            var adminCheck = await ValidateAdminAsync(dto.AdminId, dto.SchoolId);
+            if (!adminCheck.Ok) return new Result<CategoryResponseDto> { Success = false, StatusCode = "403", Message = adminCheck.Message };
 
-            if (await _db.Categories.AnyAsync(x => x.Name == dto.Name && x.Id != id))
-                return new Result<CategoryResponseDto>
-                {
-                    Success = false,
-                    StatusCode = "409",
-                    Message = "Category name already exists"
-                };
+            if (await _db.Categories.AnyAsync(x => x.Name == dto.Name && x.Id != id && x.SchoolId == dto.SchoolId))
+                return new Result<CategoryResponseDto> { Success = false, StatusCode = "409", Message = "Category name exists" };
 
-            // ****************************
-            // SIZE VALIDATION LOGIC
-            // ****************************
-            if (!dto.HasSizeVariants)
-            {
-                dto.SizeType = SizeType.None;
-                dto.AvailableSizes = null;
-            }
-            else
-            {
-                if (dto.SizeType == SizeType.None)
-                    return new Result<CategoryResponseDto>
-                    {
-                        Success = false,
-                        StatusCode = "422",
-                        Message = "SizeType is required when HasSizeVariants = true"
-                    };
-
-                if (string.IsNullOrWhiteSpace(dto.AvailableSizes))
-                    return new Result<CategoryResponseDto>
-                    {
-                        Success = false,
-                        StatusCode = "422",
-                        Message = "AvailableSizes is required when HasSizeVariants = true"
-                    };
-            }
-            // ****************************
-
-            // IMAGE REPLACE
-            if (dto.NewImage != null)
-            {
-                var newUrl = await SaveImageAsync(dto.NewImage);
-
-                if (!string.IsNullOrWhiteSpace(c.ImageUrl))
-                {
-                    var root = _env.WebRootPath ?? Path.Combine(Directory.GetCurrentDirectory(), "wwwroot");
-                    var oldPath = Path.Combine(root, c.ImageUrl.TrimStart('/').Replace("/", Path.DirectorySeparatorChar.ToString()));
-
-                    if (File.Exists(oldPath))
-                    {
-                        try { File.Delete(oldPath); } catch { }
-                    }
-                }
-
-                c.ImageUrl = newUrl;
-            }
-
-            // Update normal fields
+            // update scalar fields
             c.Name = dto.Name;
-            c.HasSizeVariants = dto.HasSizeVariants;
-            c.SizeType = dto.SizeType;
-            c.AvailableSizes = dto.AvailableSizes;
             c.IsActive = dto.IsActive;
 
-            await _db.SaveChangesAsync();
-
-            return new Result<CategoryResponseDto>
+            await using var tx = await _db.Database.BeginTransactionAsync();
+            try
             {
-                Success = true,
-                StatusCode = "200",
-                Message = "Category updated",
-                Data = new CategoryResponseDto
+                await _db.SaveChangesAsync();
+
+                // sync mapping: compute toAdd and toRemove
+                var existingMaps = await _db.CategoryCategoryAttributes.Where(m => m.CategoryId == id).ToListAsync();
+                var existingAttrIds = existingMaps.Select(m => m.CategoryAttributeId).ToHashSet();
+                var incoming = dto.AttributeIds.Distinct().ToHashSet();
+
+                var toAdd = incoming.Except(existingAttrIds).ToList();
+                var toRemove = existingAttrIds.Except(incoming).ToList();
+
+                // validate attributes to add
+                foreach (var aid in toAdd)
                 {
-                    Id = c.Id,
-                    SchoolId = c.SchoolId,
-                    AdminId = c.AdminId,
-                    Name = c.Name,
-                    HasSizeVariants = c.HasSizeVariants,
-                    SizeType = c.SizeType,
-                    AvailableSizes = c.AvailableSizes,
-                    ImageUrl = c.ImageUrl,
-                    IsActive = c.IsActive,
-                    CreatedAt = c.CreatedAt
+                    var ok = await _db.CategoryAttributes.AnyAsync(a => a.Id == aid && a.SchoolId == dto.SchoolId);
+                    if (!ok)
+                    {
+                        await tx.RollbackAsync();
+                        return new Result<CategoryResponseDto> { Success = false, StatusCode = "422", Message = $"Attribute {aid} not found for school." };
+                    }
+                    _db.CategoryCategoryAttributes.Add(new CategoryCategoryAttribute { CategoryId = id, CategoryAttributeId = aid, CreatedAt = DateTime.UtcNow });
                 }
-            };
+
+                if (toRemove.Count > 0)
+                {
+                    var removeEntities = existingMaps.Where(m => toRemove.Contains(m.CategoryAttributeId)).ToList();
+                    _db.CategoryCategoryAttributes.RemoveRange(removeEntities);
+                }
+
+                await _db.SaveChangesAsync();
+                await tx.CommitAsync();
+            }
+            catch (Exception ex)
+            {
+                await tx.RollbackAsync();
+                _logger.LogError(ex, "Update category failed");
+                return new Result<CategoryResponseDto> { Success = false, StatusCode = "500", Message = "Failed to update category" };
+            }
+
+            return await GetByIdAsync(id) as Result<CategoryResponseDto>;
         }
-
-
-
-        //  DELETE
 
         public async Task<Result<bool>> DeleteAsync(int id)
         {
-            var c = await _db.Categories.FirstOrDefaultAsync(x => x.Id == id);
-            if (c == null)
-                return new Result<bool>
-                {
-                    Success = false,
-                    StatusCode = "404",
-                    Message = "Category not found",
-                    Data = false
-                };
+            var c = await _db.Categories.FindAsync(id);
+            if (c == null) return new Result<bool> { Success = false, StatusCode = "404", Message = "Category not found", Data = false };
 
-            var check = await ValidateAdminAsync(c.AdminId, c.SchoolId);
-            if (!check.Ok)
-                return new Result<bool>
-                {
-                    Success = false,
-                    StatusCode = "403",
-                    Message = check.Message,
-                    Data = false
-                };
+            var adminCheck = await ValidateAdminAsync(c.AdminId, c.SchoolId);
+            if (!adminCheck.Ok) return new Result<bool> { Success = false, StatusCode = "403", Message = adminCheck.Message, Data = false };
 
-            _db.Categories.Remove(c);
-            await _db.SaveChangesAsync();
-
-            return new Result<bool>
+            try
             {
-                Success = true,
-                StatusCode = "200",
-                Message = "Category deleted",
-                Data = true
-            };
+                // maps will be cascade deleted if configured; otherwise remove explicitly
+                var maps = _db.CategoryCategoryAttributes.Where(m => m.CategoryId == id);
+                _db.CategoryCategoryAttributes.RemoveRange(maps);
+
+                _db.Categories.Remove(c);
+                await _db.SaveChangesAsync();
+
+                return new Result<bool> { Success = true, StatusCode = "200", Message = "Category deleted", Data = true };
+            }
+            catch (Exception ex)
+            {
+                _logger.LogError(ex, "Delete category failed");
+                return new Result<bool> { Success = false, StatusCode = "500", Message = "Failed to delete category", Data = false };
+            }
         }
     }
 }

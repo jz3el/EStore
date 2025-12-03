@@ -1,6 +1,6 @@
 ﻿using System.ComponentModel.DataAnnotations;
 
-public class CategoryCreateDto
+public class CategoryUpdateDto
 {
     [Required, MaxLength(150)]
     public string Name { get; set; } = string.Empty;
@@ -11,6 +11,8 @@ public class CategoryCreateDto
     [Required]
     public Guid AdminId { get; set; }
 
-    // list of attribute ids selected by the user when creating category
+    public bool IsActive { get; set; } = true;
+
+    // new/updated list of attribute ids
     public List<int> AttributeIds { get; set; } = new();
 }
